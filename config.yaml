@@ -1,0 +1,328 @@
+# =============================================================================
+# Embryo Development Classification - Master Configuration
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Data Configuration
+# -----------------------------------------------------------------------------
+data:
+  # Root directory containing all focal plane folders
+  data_root: "/data/embryo"
+
+  # Focal plane folder naming: will look for embryo_dataset_F1 ... embryo_dataset_F7
+  focal_prefix: "embryo_dataset_F"
+  num_focal_planes: 7
+  focal_indices: [1, 2, 3, 4, 5, 6, 7]  # which focal planes to use
+
+  # JSON files listing patient names for train/test split
+  train_json: "/data/embryo/train_patients.json"   # {"patients": ["P001", "P002", ...]}
+  test_json: "/data/embryo/test_patients.json"     # {"patients": ["P099", "P100", ...]}
+
+  # Stage annotation format: "csv" or "folder"
+  # csv: expects a CSV with columns [patient, stage, start_frame, end_frame]
+  # folder: expects subfolders named like "t001_t010_stage3" inside each patient dir
+  annotation_format: "csv"
+  annotation_csv: "/data/embryo/annotations.csv"  # used if annotation_format = csv
+  annotation_folder_pattern: "t{start:03d}_t{end:03d}_stage{stage}"  # used if annotation_format = folder
+
+  # Image settings
+  image_ext: ".png"                  # file extension: .png, .jpg, .tif
+  image_size: [224, 224]             # [H, W] resize target
+  image_channels: 3                  # 1 for grayscale, 3 for RGB
+
+  # Number of development stages for classification
+  num_stages: 16
+
+  # Stage groupings for multi-head fine-tuning
+  stage_groups:
+    early: [1, 2, 3, 4]        # cell counting stages
+    mid: [5, 6, 7, 8]          # compaction/morula stages
+    late: [9, 10, 11, 12, 13, 14, 15, 16]  # blastocyst stages
+
+  # Cross-validation
+  use_cross_validation: false
+  cv_folds: 5
+  cv_fold_index: 0              # which fold to use (0-indexed) when running single fold
+
+  # DataLoader settings
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+
+# -----------------------------------------------------------------------------
+# Preprocessing Configuration
+# -----------------------------------------------------------------------------
+preprocessing:
+  # Preprocessing method to apply before augmentation.
+  # Options: null, 'clahe', 'minmax', 'canny', 'laplacian', 'hsv',
+  #          'hsv_normal', 'high_pass', 'low_pass', 'wavelet'
+  # Set to null to skip preprocessing
+  method: "clahe"
+
+  # Per-method parameters
+  normalization:
+    clahe:
+      clip_limit: 2.0
+      tile_grid_size: 8
+    minmax: {}  # no params
+
+  edge_detection:
+    canny:
+      low_threshold: 50
+      high_threshold: 150
+    laplacian:
+      ksize: 3
+      threshold: 30
+
+  frequency_analysis:
+    low_pass_divisor: 8
+
+  wavelet:
+    haar:
+      level: 2
+
+  # Image normalization (mean/std) for final ToTensor step
+  # ImageNet defaults; set to null to skip normalization
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+# -----------------------------------------------------------------------------
+# Model Architecture Configuration
+# -----------------------------------------------------------------------------
+model:
+  # Backbone: 'resnet18', 'resnet34', 'resnet50', 'vit_small', 'vit_base'
+  backbone: "resnet50"
+
+  # ViT-specific settings (used if backbone starts with 'vit')
+  vit:
+    patch_size: 16
+    embed_dim: 384       # vit_small=384, vit_base=768
+    depth: 12
+    num_heads: 6
+    mlp_ratio: 4.0
+    drop_path_rate: 0.1
+
+  # ResNet-specific settings
+  resnet:
+    pretrained: false     # use torchvision ImageNet weights as init
+    remove_last_layer: true
+
+  # Embedding dimension from backbone
+  embed_dim: 2048         # resnet50=2048, resnet18/34=512, vit_small=384, vit_base=768
+
+  # Projection head (for contrastive pretraining)
+  projection_head:
+    hidden_dim: 2048
+    output_dim: 256
+    num_layers: 3
+    use_bn: true
+
+  # MAE decoder
+  mae_decoder:
+    decoder_embed_dim: 512
+    decoder_depth: 8
+    decoder_num_heads: 16
+    patch_size: 16
+    mask_ratio: 0.75
+
+  # Multi-focal fusion module
+  fusion:
+    method: "attention"    # 'mean', 'max', 'attention', 'cross_attention'
+    num_heads: 8
+    dropout: 0.1
+
+  # Temporal head
+  temporal:
+    type: "gru"            # 'gru', 'transformer'
+    hidden_dim: 512
+    num_layers: 2
+    dropout: 0.1
+    # Transformer-specific
+    transformer_heads: 8
+    transformer_depth: 4
+
+  # Classifier heads (fine-tuning)
+  classifier:
+    # Mixture of Experts configuration
+    use_moe: true
+    num_experts: 3          # one per stage group (early/mid/late)
+    router_hidden_dim: 256
+    head_hidden_dim: 512
+    dropout: 0.2
+    use_temporal_gru: true  # apply GRU before classifier
+
+  # Temporal gap prediction head (pretraining)
+  temporal_gap_head:
+    num_bins: 5             # [1, 2, 3-4, 5-8, 9+]
+    hidden_dim: 256
+
+# -----------------------------------------------------------------------------
+# Pretraining Configuration
+# -----------------------------------------------------------------------------
+pretrain:
+  # Output directory for checkpoints and logs
+  output_dir: "./outputs/pretrain"
+
+  # Training schedule
+  epochs: 200
+  warmup_epochs: 10
+  batch_size: 64
+  eval_every: 10         # validate/checkpoint every N epochs
+
+  # Optimizer
+  optimizer: "adamw"
+  lr: 1.5e-4             # base LR (scaled by batch_size/256 if lr_scale=true)
+  lr_scale: true
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.95
+  clip_grad_norm: 1.0
+
+  # LR scheduler
+  scheduler: "cosine"    # 'cosine', 'step', 'plateau'
+  min_lr: 1e-6
+
+  # Mixed precision
+  use_amp: true
+  amp_dtype: "float16"   # 'float16' or 'bfloat16'
+
+  # Gradient checkpointing (saves memory at cost of speed)
+  gradient_checkpointing: false
+
+  # Loss weights for combined pretraining objective
+  loss_weights:
+    contrastive: 1.0
+    mae: 1.0
+    temporal: 0.5
+
+  # Contrastive loss settings
+  contrastive:
+    temperature: 0.07
+    queue_size: 65536      # negative queue size (MoCo-style); 0 = in-batch only
+    use_queue: false
+
+  # MAE settings
+  mae:
+    mask_ratio: 0.75
+    # 'same': reconstruct same focal plane
+    # 'best_focus': reconstruct best-focus plane (highest sharpness)
+    reconstruction_target: "best_focus"
+    norm_pix_loss: true    # normalize pixel values in loss
+    loss_on_masked_only: true
+
+  # Temporal self-supervision settings
+  temporal_ssl:
+    task: "gap_prediction"   # 'gap_prediction' or 'order_prediction'
+    max_time_delta: 20       # max frames to look ahead
+    gap_bins: [1, 2, 4, 8]  # bin boundaries → 5 classes: ≤1, 2, 3-4, 5-8, ≥9
+
+  # Data augmentation for pretraining
+  augmentation:
+    random_crop: true
+    crop_scale: [0.2, 1.0]
+    random_hflip: true
+    random_vflip: false
+    color_jitter: true
+    color_jitter_strength: 0.4
+    grayscale_prob: 0.2
+    gaussian_blur: true
+    blur_sigma: [0.1, 2.0]
+
+# -----------------------------------------------------------------------------
+# Fine-tuning Configuration
+# -----------------------------------------------------------------------------
+finetune:
+  # Output directory
+  output_dir: "./outputs/finetune"
+
+  # Pretrained checkpoint to load
+  pretrain_checkpoint: "./outputs/pretrain/best_model.pth"
+
+  # Training schedule
+  epochs: 50
+  warmup_epochs: 5
+  batch_size: 32
+  eval_every: 5
+
+  # Three-phase progressive unfreezing
+  phase1_epochs: 10     # freeze encoder, train fusion+heads only
+  phase2_epochs: 15     # unfreeze last N encoder blocks
+  phase3_epochs: 25     # unfreeze full encoder
+  unfreeze_blocks: 2    # num blocks to unfreeze in phase 2
+
+  # Optimizer
+  optimizer: "adamw"
+  lr: 1e-4              # head LR
+  encoder_lr_scale: 0.1 # encoder gets lr * encoder_lr_scale
+  layer_lr_decay: 0.75  # layer-wise LR decay factor (deeper layers get lower LR)
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.999
+  clip_grad_norm: 1.0
+
+  # LR scheduler
+  scheduler: "cosine"
+  min_lr: 1e-7
+
+  # Mixed precision
+  use_amp: true
+  amp_dtype: "float16"
+
+  # Loss weights
+  loss_weights:
+    classification: 1.0
+    cell_count_aux: 0.3      # auxiliary cell count regression (stages 1-4)
+    blastocyst_aux: 0.2      # auxiliary blastocyst expansion score (stages 9-16)
+    monotonicity: 0.1        # temporal monotonicity penalty
+    moe_diversity: 0.05      # encourage expert specialization
+
+  # Label smoothing
+  label_smoothing: 0.1
+
+  # Class weights (if null, computed from data)
+  class_weights: null
+
+  # Temporal context window for GRU
+  temporal_window: 10   # number of frames in sequence
+
+  # Data augmentation for fine-tuning (less aggressive than pretraining)
+  augmentation:
+    random_crop: true
+    crop_scale: [0.8, 1.0]
+    random_hflip: true
+    random_vflip: false
+    color_jitter: false
+    gaussian_blur: false
+
+# -----------------------------------------------------------------------------
+# Logging & Checkpointing
+# -----------------------------------------------------------------------------
+logging:
+  # 'tensorboard', 'csv', or 'both'
+  backend: "both"
+  log_dir: "./logs"
+  log_every: 10         # log every N iterations
+
+  # Metrics to track
+  track_metrics:
+    - "loss"
+    - "accuracy_top1"
+    - "accuracy_top3"
+    - "f1_macro"
+    - "per_stage_accuracy"
+
+  # Checkpoint settings
+  save_best_metric: "accuracy_top1"
+  save_top_k: 3         # keep top K checkpoints
+  save_last: true
+
+# -----------------------------------------------------------------------------
+# Hardware / Runtime
+# -----------------------------------------------------------------------------
+runtime:
+  seed: 42
+  device: "cuda"         # 'cuda' or 'cpu'
+  gpu_id: 0
+  deterministic: false   # True for reproducibility (slower)
+  benchmark: true        # cudnn benchmark (faster for fixed input sizes)
+  compile: false         # torch.compile() (PyTorch 2.0+, experimental)
